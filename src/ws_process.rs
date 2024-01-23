@@ -5,6 +5,8 @@ use futures_util::stream::SplitStream;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 use serde_json::Value;
+use serde_json::Value::Number;
+use serde_json::Value::String as SerdeString;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::sleep;
@@ -16,26 +18,31 @@ use tokio_tungstenite::WebSocketStream;
 //-----------------------------------------------------------------------------------------
 pub async fn listen_to_websocket(
     exchange: String,
-    ws_url: &str,
+    ws_url: String,
     duration_seconds: u64,
-    subscribe_msg: Option<&str>,
+    subscribe_msg: Option<String>,
+    pointer: String,
     res_counter: std::sync::Arc<std::sync::Mutex<Counter>>,
     key_counter: std::sync::Arc<std::sync::Mutex<KeyCounter>>,
 ) -> Result<(String, f64, Vec<u8>), WsError> {
     //
-    let ws_stream = connect_async(ws_url)
-        .await
-        .expect("Error connecting to WebSocket")
-        .0;
+    let ws_stream = connect_async(ws_url).await?;
+    // .expect("Error connecting to WebSocket")
+    // .0;
 
-    let (mut write, read) = ws_stream.split();
+    let (mut write, read) = ws_stream.0.split();
     let counter = std::sync::Arc::new(std::sync::Mutex::new(Counter::new()));
 
     if let Some(msg) = subscribe_msg {
         write.send(Message::Text(msg.to_string())).await?;
     }
 
-    tokio::spawn(read_messages(exchange.clone(), read, counter.clone()));
+    tokio::spawn(read_messages(
+        exchange.clone(),
+        pointer,
+        read,
+        counter.clone(),
+    ));
     sleep(Duration::from_secs(duration_seconds)).await;
     write.send(Message::Close(None)).await?;
     //
@@ -70,6 +77,7 @@ pub async fn listen_to_websocket(
 
 pub async fn read_messages(
     exchange: String,
+    pointer: String,
     mut read: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     counter: std::sync::Arc<std::sync::Mutex<Counter>>,
 ) {
@@ -77,42 +85,23 @@ pub async fn read_messages(
         match message {
             Message::Text(text) => {
                 let json_value: Value = serde_json::from_str(&text).unwrap();
-                if exchange.eq("Gemini".into()) {
-                    let price = json_value
-                        .get("events")
-                        .and_then(|events| events.get(0))
-                        .and_then(|event| event.get("price"))
-                        .and_then(|price| price.as_str())
-                        .and_then(|price_str| price_str.parse::<f64>().ok())
-                        .unwrap();
-                    counter.lock().unwrap().add_price(price, text);
-                } else if exchange.eq("Bybit".into()) {
-                    if let Some(data) = json_value.pointer("/data/0/price") {
-                        let price = data.as_f64().unwrap();
-                        counter.lock().unwrap().add_price(price, text);
-                    }
-                } else if exchange.eq("Binance".into()) {
-                    let price = json_value
-                        .get("p")
-                        .and_then(|price| price.as_str())
-                        .and_then(|prce_str| prce_str.parse::<f64>().ok())
-                        .unwrap();
-                    counter.lock().unwrap().add_price(price, text);
-                } else if exchange.eq("Kraken".into()) {
-                    if let Some(data) = json_value.pointer("/1/p") {
-                        let price = data
-                            .get(0)
-                            .and_then(|price_str| price_str.as_str())
-                            .and_then(|price| price.parse::<f64>().ok())
-                            .unwrap();
-                        counter.lock().unwrap().add_price(price, text);
-                    }
-                } else if exchange.eq("Bitfinex".into()) {
-                    if let Some(data) = json_value.pointer("/1/6") {
-                        counter
-                            .lock()
-                            .unwrap()
-                            .add_price(data.as_f64().unwrap(), text);
+                if let Some(data) = json_value.pointer(pointer.as_str()) {
+                    match data {
+                        Number(price) => {
+                            let price = price.as_f64().unwrap();
+                            println!("{:?} 111111111{:?}", pointer, data);
+
+                            counter.lock().unwrap().add_price(price, text);
+                        }
+                        SerdeString(price) => {
+                            let price = data
+                                .as_str()
+                                .and_then(|price_str| price_str.parse::<f64>().ok())
+                                .unwrap();
+                            counter.lock().unwrap().add_price(price, text);
+                            println!("{:?} 222222222{:?}    ", pointer, data);
+                        }
+                        _ => {}
                     }
                 }
             }
